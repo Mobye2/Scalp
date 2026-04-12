@@ -1,0 +1,1 @@
+[E 2026-04-12 12:38:44,255 C:\Users\wayne\AppData\Roaming\Python\Python312\site-packages\shioaji\shioaji.py:436:place_order] {'status': {'status_code': 406}, 'response': {'detail': 'Please sign F0020001987937 first.'}}
