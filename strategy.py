@@ -60,6 +60,7 @@ class StrategyState:
     # 持倉狀態
     bought:        bool               = False
     order_filled:  bool               = False  # 買單已實際成交
+    entry_trade:   object             = None   # 買單 trade 物件，用於撤單
     bought_time:   Optional[datetime] = None
     trade_count:   int                = 0   # 當日進出場次數（上限 2）
 
@@ -209,6 +210,7 @@ def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) ->
         return
 
     state.bought       = True
+    state.entry_trade  = trade
     state.bought_time  = tick.datetime
     state.peak_bid_vol = state.bid_vol_at_limit_up
 
@@ -237,6 +239,7 @@ def _reset_after_exit(state: StrategyState) -> None:
     """出場後重置持倉狀態，累計次數 +1"""
     state.bought                     = False
     state.order_filled               = False
+    state.entry_trade                = None
     state.bought_time                = None
     state.peak_bid_vol               = 0
     state.cumulative_trade_after_buy = 0
@@ -289,10 +292,30 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
 
 def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> None:
     """三條件任一成立即市價出場"""
-    if not state.bought or not state.order_filled:
+    if not state.bought:
         return
 
-    # 停損 A：委賣壓頂
+    # 狀況1：有委託但未成交 → 停損條件成立時撤買單
+    if not state.order_filled:
+        if (
+            state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier
+            or (state.last_price < state.vwap and state.vwap > 0)
+            or (
+                state.peak_bid_vol > 0
+                and (state.peak_bid_vol - state.bid_vol_at_limit_up) / state.peak_bid_vol > CFG.stop_c_shrink_ratio
+                and (state.peak_bid_vol - state.bid_vol_at_limit_up) > state.cumulative_trade_after_buy
+            )
+        ):
+            print(f"[Cancel] {stock_id} 停損條件成立但未成交，撤銷買單")
+            try:
+                api.cancel_order(state.entry_trade)
+                api.update_status(api.stock_account)
+            except Exception as e:
+                print(f"[Cancel] 撤單失敗: {e}")
+            _reset_after_exit(state)
+        return
+
+    # 狀況2：已成交 → 停損條件成立時送賣單
     if state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier:
         _execute_exit(state, api, stock_id, reason="停損A：委賣壓頂")
         return
