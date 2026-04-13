@@ -9,11 +9,13 @@ class Config:
     simulation: bool  = True
 
     # ── 時間窗口 ──────────────────────────────────────
-    entry_time_start: tuple = (9, 0, 0)   # 09:00:00
-    entry_time_end:   tuple = (10, 0, 0)  # 10:00:00
+    entry_time_start: tuple = (9, 0, 0)    # 09:00:00
+    entry_time_end:   tuple = (13, 25, 0)  # 13:25:00
 
     # ── 資金門檻 ──────────────────────────────────────
-    large_order_amount:  float = 30_000_000   # 條件 C：10 秒內外盤累計金額門檻
+    # 條件 C：動態門檻 = max(5日均日成交金額 × large_order_ratio, large_order_min)
+    large_order_ratio:   float = 0.015        # 5日均日成交金額的比例
+    large_order_min:     float = 5_000_000    # 保底門檻（冷門股用）
     trigger_amount:      float = 30_000_000   # 條件 D / 停損 A：點火水位基準金額
     price_factor_threshold: float = 200.0     # 高價股分界
     price_factor_high:   float = 1.5          # 漲停價 ≥ 200 元時的調整係數

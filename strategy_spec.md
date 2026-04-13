@@ -11,8 +11,10 @@ price_factor = 1.5 if limit_up_price >= 200 else 1.0
 # 點火水位（條件 D、停損 A 用）
 trigger_lot = math.ceil(30_000_000 * price_factor / (limit_up_price * 1_000))
 
-# 條件 C 累計金額門檻（固定 3000 萬，不受 price_factor 影響）
-large_order_amount = 30_000_000
+# 條件 C 累計金額門檻（動態，依個股流動性調整）
+# 取過去 10 個日曆日的 1 分 K，加總每日成交金額，取最近 5 個交易日平均
+avg_5d_daily_amount = 過去5交易日均日成交金額  # 元
+large_order_amount = max(avg_5d_daily_amount * 0.015, 5_000_000)
 
 # 狀態變數
 ask_vol_at_limit_up        = float('inf')  # 漲停委賣量（初始設大，避免條件 D 誤觸）
@@ -48,8 +50,8 @@ recent_large_window        = []           # 滑動 10 秒外盤大單佇列 [(da
 ## 進場條件（四條件同時成立）
 
 ### 條件 A｜時間濾網
-- 範圍：`09:00:00 < now < 10:00:00`
-- 早盤動能最強，鎖死後不易打開
+- 範圍：`09:00:00 < now < 13:25:00`
+- 早盤動能最強，13:25 後收盤前試搓性質不同不適用
 
 ### 條件 B｜價格位置
 - 條件：`tick.close >= limit_up_price - get_tick_size(limit_up_price)`
@@ -57,7 +59,10 @@ recent_large_window        = []           # 滑動 10 秒外盤大單佇列 [(da
 - 確認主力正在攻擊漲停，而非隨機跳動
 
 ### 條件 C｜動能確認
-- 條件：過去 10 秒內，外盤（`tick_type == 1`）成交累計金額 ≥ 3,000 萬
+- 條件：過去 10 秒內，外盤（`tick_type == 1`）成交累計金額 ≥ `large_order_amount`
+- `large_order_amount = max(avg_5d_daily_amount × 1.5%, 500 萬)`
+  - `avg_5d_daily_amount`：程式啟動時取過去 5 交易日平均日成交金額（元）
+  - 保底 500 萬：避免冷門股門檻過低
 - 金額計算：`float(tick.close) × tick.volume × 1000`（元 × 張 × 1000股/張）
 - 滑動窗口：每筆 tick 加入佇列，清除 10 秒前的紀錄，加總剩餘金額
 - 確認是主力連續大力敲進，過濾假大單（小量多筆）
@@ -137,8 +142,8 @@ vwap = cumulative_pv / cumulative_vol if cumulative_vol > 0 else 0.0
 
 | 參數 | 數值 |
 |------|------|
-| 時間窗口 | 09:00:00 – 10:00:00 |
-| 條件 C 累計金額門檻 | 3,000 萬元 |
+| 時間窗口 | 09:00:00 – 13:25:00 |
+| 條件 C 累計金額門檻 | 動態：5日均日成交金額 × 1.5%，保底 500 萬 |
 | 條件 C 滑動窗口 | 10 秒 |
 | 點火水位 | 3,000 萬元換算張數 |
 | price_factor（< 200 元） | 1.0 |

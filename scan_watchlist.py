@@ -284,16 +284,22 @@ def screen(df: pd.DataFrame, contract, verbose: bool = False) -> dict | None:
     if strength < CLOSE_STRENGTH:
         return reject(f"收盤強度 {strength:.3f} < {CLOSE_STRENGTH}")
 
+    # 條件 C 動態門檻：過去 5 日均日成交金額 × 1.5%，保底 500 萬
+    daily_amounts = df["Close"] * df["Volume"] * 1000
+    avg_5d_amount = daily_amounts.iloc[-6:-1].mean()  # 不含今日，取前5日
+    large_order_amount = max(avg_5d_amount * 0.015, 5_000_000)
+
     return {
-        "stock_id":   contract.code,
-        "name":       contract.name,
-        "close":      round(close, 2),
-        "change_pct": round(change_pct, 2),
-        "volume":     int(volume),
-        "amount_m":   round(amount / 1e6, 1),
-        "ma5":        round(ma5_today, 2),
-        "ma20":       round(ma20_today, 2),
-        "strength":   round(strength, 3),
+        "stock_id":           contract.code,
+        "name":               contract.name,
+        "close":              round(close, 2),
+        "change_pct":         round(change_pct, 2),
+        "volume":             int(volume),
+        "amount_m":           round(amount / 1e6, 1),
+        "ma5":                round(ma5_today, 2),
+        "ma20":               round(ma20_today, 2),
+        "strength":           round(strength, 3),
+        "large_order_amount": round(large_order_amount, 0),
     }
 
 

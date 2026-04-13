@@ -9,6 +9,7 @@ from typing import Optional, Union
 import shioaji as sj
 
 from config import CFG
+from trade_logger import log_trade
 
 
 # ── 輔助函式 ──────────────────────────────────────────────────────────────────
@@ -39,8 +40,9 @@ def get_limit_up_price(contract: sj.contracts.Stock) -> float:
 @dataclass
 class StrategyState:
     # 盤前計算（初始化後不變）
-    limit_up_price: float = 0.0
-    trigger_lot:    int   = 0
+    limit_up_price:     float = 0.0
+    trigger_lot:        int   = 0
+    large_order_amount: float = 5_000_000
 
     # 即時行情
     ask_vol_at_limit_up: float = float('inf')  # 初始設大，避免條件 D 誤觸
@@ -56,18 +58,32 @@ class StrategyState:
     recent_large_window: list = field(default_factory=list)
 
     # 持倉狀態
-    bought:      bool               = False
-    bought_time: Optional[datetime] = None
-    trade_count: int                = 0   # 當日進出場次數（上限 2）
+    bought:        bool               = False
+    order_filled:  bool               = False  # 買單已實際成交
+    bought_time:   Optional[datetime] = None
+    trade_count:   int                = 0   # 當日進出場次數（上限 2）
 
     # 停損 C 用
     peak_bid_vol:               int = 0
     cumulative_trade_after_buy: int = 0
 
+    # 診斷用計數器
+    tick_count:   int                = 0
+    bidask_count: int                = 0
+    last_tick_dt: Optional[datetime] = None
+    last_ba_dt:   Optional[datetime] = None
+
+    # 診斷用：最近 tick 逐筆條件快照 (ring buffer, 最多 50 筆)
+    debug_ticks: list = field(default_factory=list)
+    DEBUG_TICK_MAX: int = 50
+
+    # 最新五檔（供 monitor 顯示）
+    last_bidask: dict = field(default_factory=dict)
+
 
 # ── 盤前初始化 ────────────────────────────────────────────────────────────────
 
-def init_state(contract: sj.contracts.Stock) -> StrategyState:
+def init_state(contract: sj.contracts.Stock, large_order_amount: float) -> StrategyState:
     """08:30 執行一次，計算當日固定參數"""
     state = StrategyState()
     state.limit_up_price = get_limit_up_price(contract)
@@ -80,6 +96,7 @@ def init_state(contract: sj.contracts.Stock) -> StrategyState:
     state.trigger_lot = math.ceil(
         CFG.trigger_amount * price_factor / (state.limit_up_price * 1_000)
     )
+    state.large_order_amount = large_order_amount
     return state
 
 
@@ -89,42 +106,84 @@ MAX_TRADES_PER_DAY = 2
 
 
 def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
-    """四條件同時成立才回傳 True"""
+    """四條件同時成立才回傳 True，同時產生診斷快照"""
     now = tick.datetime.time()
-
-    # 當日進出場次數上限
-    if state.trade_count >= MAX_TRADES_PER_DAY:
-        return False
+    close = float(tick.close)
+    tick_size = get_tick_size(state.limit_up_price)
 
     # 條件 A：時間濾網
     entry_start = time(*CFG.entry_time_start)
     entry_end   = time(*CFG.entry_time_end)
-    if not (entry_start < now < entry_end):
-        return False
+    cond_a = entry_start < now < entry_end
 
     # 條件 B：價格位置（漲停價或下一檔）
-    tick_size = get_tick_size(state.limit_up_price)
-    if float(tick.close) < state.limit_up_price - tick_size:
-        return False
+    cond_b = close >= state.limit_up_price - tick_size
 
     # 條件 C：10 秒內外盤累計金額 ≥ 門檻
     if tick.tick_type == 1:  # 外盤
-        amount = float(tick.close) * tick.volume * 1_000
+        amount = close * tick.volume * 1_000
         state.recent_large_window.append((tick.datetime, amount))
-
     cutoff = tick.datetime - timedelta(seconds=CFG.large_window_seconds)
     state.recent_large_window = [
         (dt, amt) for dt, amt in state.recent_large_window if dt > cutoff
     ]
     window_amount = sum(amt for _, amt in state.recent_large_window)
-    if window_amount < CFG.large_order_amount:
-        return False
+    cond_c = window_amount >= state.large_order_amount
 
     # 條件 D：點火水位
-    if state.ask_vol_at_limit_up >= state.trigger_lot:
+    ask_vol = state.ask_vol_at_limit_up if state.ask_vol_at_limit_up != float('inf') else -1
+    cond_d = ask_vol < state.trigger_lot and ask_vol >= 0
+
+    # 停損條件快照（僅持倉時才計算，未持倉顯示 "-"）
+    if state.bought:
+        stop_a_threshold = state.trigger_lot * CFG.stop_a_multiplier
+        stop_a = ask_vol > stop_a_threshold if ask_vol >= 0 else False
+        stop_b = state.last_price < state.vwap if state.vwap > 0 else False
+        if state.peak_bid_vol > 0:
+            shrink     = state.peak_bid_vol - state.bid_vol_at_limit_up
+            shrink_pct = shrink / state.peak_bid_vol
+            stop_c = shrink_pct > CFG.stop_c_shrink_ratio and shrink > state.cumulative_trade_after_buy
+        else:
+            shrink_pct = 0.0
+            stop_c = False
+        stop_snap = {
+            "stopA": stop_a,  "stopA_v": f"ask={ask_vol} > {stop_a_threshold:.0f}",
+            "stopB": stop_b,  "stopB_v": f"price={state.last_price} < vwap={round(state.vwap,2)}",
+            "stopC": stop_c,  "stopC_v": f"shrink={shrink_pct:.1%} peak={state.peak_bid_vol} bid={state.bid_vol_at_limit_up}",
+        }
+    else:
+        stop_snap = {
+            "stopA": "-", "stopA_v": "-",
+            "stopB": "-", "stopB_v": "-",
+            "stopC": "-", "stopC_v": "-",
+        }
+
+    # 寫入診斷 ring buffer
+    snap = {
+        "t":       tick.datetime.strftime("%H:%M:%S.%f")[:12],
+        "price":   close,
+        "vol":     tick.volume,
+        "type":    "外" if tick.tick_type == 1 else ("內" if tick.tick_type == 2 else "?"),
+        "vwap":    round(state.vwap, 2),
+        "A":       cond_a,
+        "B":       cond_b,
+        "B_val":   f"{close} >= {state.limit_up_price - tick_size}",
+        "C":       cond_c,
+        "C_val":   f"{window_amount/1e6:.1f}M / {state.large_order_amount/1e6:.1f}M",
+        "D":       cond_d,
+        "D_val":   f"ask={ask_vol} < trig={state.trigger_lot}",
+        "bought":  state.bought,
+        **stop_snap,
+    }
+    state.debug_ticks.append(snap)
+    if len(state.debug_ticks) > state.DEBUG_TICK_MAX:
+        state.debug_ticks = state.debug_ticks[-state.DEBUG_TICK_MAX:]
+
+    # 次數上限
+    if state.trade_count >= MAX_TRADES_PER_DAY:
         return False
 
-    return True
+    return cond_a and cond_b and cond_c and cond_d
 
 
 def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) -> None:
@@ -141,10 +200,35 @@ def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) ->
         order_lot=sj.constant.StockOrderLot.Common,
         account=api.stock_account,
     )
-    api.place_order(contract, order)
+    try:
+        trade = api.place_order(contract, order)
+        order_status = str(trade.status.status)
+        print(f"[Entry] place_order status={order_status}")
+    except Exception as e:
+        print(f"[Entry] place_order 失敗，不設 bought: {e}")
+        return
+
     state.bought       = True
     state.bought_time  = tick.datetime
     state.peak_bid_vol = state.bid_vol_at_limit_up
+
+    # 記錄進場
+    log_trade({
+        "timestamp":      tick.datetime.isoformat(),
+        "stock_id":       tick.code,
+        "action":         "Entry",
+        "reason":         "四條件成立",
+        "price":          float(tick.close),
+        "limit_up_price": state.limit_up_price,
+        "vwap":           round(state.vwap, 2),
+        "ask_vol":        state.ask_vol_at_limit_up,
+        "bid_vol":        state.bid_vol_at_limit_up,
+        "trigger_lot":    state.trigger_lot,
+        "trade_count":    state.trade_count + 1,
+        "peak_bid_vol":   state.peak_bid_vol,
+        "cum_trade_vol":  state.cumulative_trade_after_buy,
+        "order_status":   order_status,
+    })
 
 
 # ── 停損邏輯 ──────────────────────────────────────────────────────────────────
@@ -152,6 +236,7 @@ def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) ->
 def _reset_after_exit(state: StrategyState) -> None:
     """出場後重置持倉狀態，累計次數 +1"""
     state.bought                     = False
+    state.order_filled               = False
     state.bought_time                = None
     state.peak_bid_vol               = 0
     state.cumulative_trade_after_buy = 0
@@ -162,6 +247,7 @@ def _reset_after_exit(state: StrategyState) -> None:
 def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: str) -> None:
     """送市價賣單並重置狀態"""
     print(f"[Exit] {stock_id} | {reason} | last_price={state.last_price} | vwap={state.vwap:.2f}")
+
     contract = api.Contracts.Stocks[stock_id]
     order = api.Order(
         price=0,
@@ -172,13 +258,38 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
         order_lot=sj.constant.StockOrderLot.Common,
         account=api.stock_account,
     )
-    api.place_order(contract, order)
+    try:
+        trade = api.place_order(contract, order)
+        order_status = str(trade.status.status)
+        print(f"[Exit] place_order status={order_status}")
+    except Exception as e:
+        print(f"[Exit] place_order 失敗: {e}")
+        order_status = f"Error: {e}"
+
+    # 記錄出場（在 reset 之前，才能取到持倉期間的數據）
+    from datetime import datetime as _dt
+    log_trade({
+        "timestamp":      _dt.now().isoformat(),
+        "stock_id":       stock_id,
+        "action":         "Exit",
+        "reason":         reason,
+        "price":          state.last_price,
+        "limit_up_price": state.limit_up_price,
+        "vwap":           round(state.vwap, 2),
+        "ask_vol":        state.ask_vol_at_limit_up,
+        "bid_vol":        state.bid_vol_at_limit_up,
+        "trigger_lot":    state.trigger_lot,
+        "trade_count":    state.trade_count + 1,
+        "peak_bid_vol":   state.peak_bid_vol,
+        "cum_trade_vol":  state.cumulative_trade_after_buy,
+        "order_status":   order_status,
+    })
     _reset_after_exit(state)
 
 
 def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> None:
     """三條件任一成立即市價出場"""
-    if not state.bought:
+    if not state.bought or not state.order_filled:
         return
 
     # 停損 A：委賣壓頂
@@ -220,6 +331,8 @@ def _worker(stock_id: str, state: StrategyState, q: queue.Queue, api: sj.Shioaji
             kind, data = event
             if kind == 'tick':
                 tick: sj.TickSTKv1 = data
+                state.tick_count   += 1
+                state.last_tick_dt  = tick.datetime
                 state.last_price    = float(tick.close)
                 state.cumulative_pv  += float(tick.close) * tick.volume
                 state.cumulative_vol += tick.volume
@@ -232,8 +345,35 @@ def _worker(stock_id: str, state: StrategyState, q: queue.Queue, api: sj.Shioaji
 
             elif kind == 'bidask':
                 bidask: sj.BidAskSTKv1 = data
-                state.ask_vol_at_limit_up = bidask.ask_volume[0]
-                state.bid_vol_at_limit_up = bidask.bid_volume[0]
+                state.bidask_count += 1
+                state.last_ba_dt    = bidask.datetime
+
+                # 掃描五檔，找出價格等於漲停價的委賣/委買量
+                # 股價未到漲停時五檔內不會有漲停價，回傳 0
+                lup = state.limit_up_price
+                ask_vol = 0
+                for p, v in zip(bidask.ask_price, bidask.ask_volume):
+                    if abs(float(p) - lup) < 0.001:  # 浮點數比較用容差
+                        ask_vol = v
+                        break
+                bid_vol = 0
+                for p, v in zip(bidask.bid_price, bidask.bid_volume):
+                    if abs(float(p) - lup) < 0.001:
+                        bid_vol = v
+                        break
+
+                # 只有真的在五檔裡找到漲停價才更新，否則維持 inf
+                state.ask_vol_at_limit_up = ask_vol if ask_vol > 0 else float('inf')
+                state.bid_vol_at_limit_up = bid_vol
+
+                # 儲存最新五檔供 monitor 顯示
+                state.last_bidask = {
+                    "ask_price": [float(p) for p in bidask.ask_price],
+                    "ask_vol":   list(bidask.ask_volume),
+                    "bid_price": [float(p) for p in bidask.bid_price],
+                    "bid_vol":   list(bidask.bid_volume),
+                }
+
                 if state.bought and state.bid_vol_at_limit_up > state.peak_bid_vol:
                     state.peak_bid_vol = state.bid_vol_at_limit_up
                 _check_stop_loss(state, api, stock_id)
