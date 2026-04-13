@@ -1,6 +1,6 @@
 # Environment
 .env
-.pfx
+*.pfx
 # Python
 __pycache__/
 *.py[cod]
