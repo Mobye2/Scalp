@@ -1,0 +1,15 @@
+timestamp,stock_id,action,reason,price,limit_up_price,vwap,ask_vol,bid_vol,trigger_lot,trade_count,peak_bid_vol,cum_trade_vol,order_status
+2026-04-14T09:04:53.907503,6425,Entry,四條件成立,78.7,78.7,77.8,58,0,382,1,0,0,Status.PendingSubmit
+2026-04-14T09:04:58.280625,6425,Exit,停損A：委賣壓頂,78.7,78.7,78.07,inf,136,382,1,136,398,Status.PendingSubmit
+2026-04-14T09:06:48.076974,7711,Entry,四條件成立,332.5,332.5,325.28,101,0,136,1,0,0,Status.PendingSubmit
+2026-04-14T09:06:52.444900,7711,Exit,停損A：委賣壓頂,332.5,332.5,327.15,inf,189,136,1,189,235,Status.PendingSubmit
+2026-04-14T09:07:45.848888,6166,Entry,四條件成立,72.2,72.3,72.18,380,0,415,1,0,0,Status.PendingSubmit
+2026-04-14T09:07:45.620052,6166,Exit,停損A：委賣壓頂,72.1,72.3,72.18,inf,0,415,1,0,110,Status.PendingSubmit
+2026-04-14T10:03:40.161671,4919,Entry,四條件成立,110.5,110.5,108.71,13,0,272,1,0,0,Status.PendingSubmit
+2026-04-14T10:03:39.596271,4919,Exit,停損A：委賣壓頂,110.5,110.5,108.71,inf,68,272,1,68,0,Status.PendingSubmit
+2026-04-14T10:05:09.705937,4919,Entry,四條件成立,110.5,110.5,108.87,235,0,272,2,0,0,Status.PendingSubmit
+2026-04-14T10:05:17.516086,4919,Exit,停損A：委賣壓頂,110.5,110.5,108.88,inf,0,272,2,0,232,Status.PendingSubmit
+2026-04-14T12:28:37.541622,6789,Entry,四條件成立,407.0,407.0,388.92,79,0,111,1,0,0,Status.PendingSubmit
+2026-04-14T12:28:36.980125,6789,Exit,停損A：委賣壓頂,407.0,407.0,389.07,inf,0,111,1,0,62,Status.PendingSubmit
+2026-04-14T12:39:43.388130,6789,Entry,四條件成立,407.0,407.0,390.43,20,0,111,2,0,0,Status.PendingSubmit
+2026-04-14T12:39:55.576926,6789,Exit,停損A：委賣壓頂,407.0,407.0,390.52,inf,0,111,2,0,44,Status.PendingSubmit
