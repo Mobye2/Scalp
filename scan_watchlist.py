@@ -5,7 +5,7 @@ scan_watchlist.py
 流程：
   1. 對每檔股票檢查 SQLite 內最新 K 棒日期
      - 資料足夠且已是最新 → 跳過
-     - 只差一個交易日     → 只抓一根補上
+     - 只差一個交易日     → 收集後用 snapshots 批次補（每批 500 檔）
      - 資料不足或差超過一天 → 重抓 30 日
   2. 從 SQLite 讀取最近 30 根 K 棒做篩選
   3. 通過條件的股票輸出至 watchlist.csv
@@ -91,21 +91,15 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
-def get_latest_date(conn: sqlite3.Connection, stock_id: str) -> date | None:
-    """回傳該股在 DB 內最新一根 K 棒的日期，無資料回傳 None"""
-    row = conn.execute(
-        "SELECT MAX(ts) FROM kbars WHERE stock_id = ?", (stock_id,)
-    ).fetchone()
-    if row and row[0]:
-        return date.fromisoformat(row[0][:10])
-    return None
-
-
-def get_bar_count(conn: sqlite3.Connection, stock_id: str) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) FROM kbars WHERE stock_id = ?", (stock_id,)
-    ).fetchone()
-    return row[0] if row else 0
+def get_all_latest(conn: sqlite3.Connection) -> dict[str, tuple[date, int]]:
+    """一次 query 取得所有股票的最新 K 棒日期與筆數，回傳 {stock_id: (latest_date, bar_count)}"""
+    rows = conn.execute(
+        "SELECT stock_id, MAX(ts), COUNT(*) FROM kbars GROUP BY stock_id"
+    ).fetchall()
+    return {
+        r[0]: (date.fromisoformat(r[1][:10]), r[2])
+        for r in rows if r[1]
+    }
 
 
 def upsert_kbars(conn: sqlite3.Connection, stock_id: str, df: pd.DataFrame) -> None:
@@ -187,36 +181,73 @@ def fetch_kbars(api: sj.Shioaji, contract, start: str, end: str) -> pd.DataFrame
 
 # ── 快取更新邏輯 ──────────────────────────────────────────────────────────────
 
-def update_cache(api: sj.Shioaji, conn: sqlite3.Connection,
-                 contract, today: date) -> str:
+SNAPSHOT_BATCH = 500  # snapshots 每批上限
+
+
+def classify_contracts(
+    conn: sqlite3.Connection, contracts: list, today: date
+) -> tuple[list, list, list]:
     """
-    檢查並更新單一股票的 K 棒快取。
-    回傳操作類型：'skip' | 'append' | 'full' | 'empty'
+    將所有股票分成三類：
+      skip_list   - 已是最新且資料足夠
+      append_list - 只差一個交易日（用 snapshots 批次補）
+      full_list   - 需要重抓 30 日
     """
-    stock_id   = contract.code
-    latest     = get_latest_date(conn, stock_id)
-    bar_count  = get_bar_count(conn, stock_id)
+    skip_list, append_list, full_list = [], [], []
+    prev    = prev_trading_day(today)
+    db_info = get_all_latest(conn)  # {stock_id: (latest_date, bar_count)}
+    for contract in contracts:
+        latest, bar_count = db_info.get(contract.code, (None, 0))
+        if latest == today and bar_count >= MIN_BARS:
+            skip_list.append(contract)
+        elif latest == prev and bar_count >= MIN_BARS:
+            append_list.append(contract)
+        else:
+            full_list.append(contract)
+    return skip_list, append_list, full_list
 
-    # 已是最新且資料足夠 → 跳過
-    if latest == today and bar_count >= MIN_BARS:
-        return "skip"
 
-    # 只差一個交易日且資料足夠 → 只補一根
-    if latest == prev_trading_day(today) and bar_count >= MIN_BARS:
-        df = fetch_kbars(api, contract,
-                         today.strftime("%Y-%m-%d"),
-                         today.strftime("%Y-%m-%d"))
-        if not df.empty:
-            upsert_kbars(conn, stock_id, df)
-        return "append"
+def batch_append_by_snapshots(
+    api: sj.Shioaji, conn: sqlite3.Connection,
+    contracts: list, today: date,
+) -> int:
+    """
+    用 snapshots 批次補當日 K 棒（收盤後執行才能拿到完整日K）。
+    回傳成功寫入筆數。
+    """
+    written = 0
+    for i in range(0, len(contracts), SNAPSHOT_BATCH):
+        batch = contracts[i : i + SNAPSHOT_BATCH]
+        try:
+            snaps = api.snapshots(batch)
+        except Exception as e:
+            log.warning("snapshots 批次失敗 (batch %d): %s", i // SNAPSHOT_BATCH, e)
+            continue
+        for snap in snaps:
+            if snap.total_volume == 0:  # 今日無交易（假日補單等）跳過
+                continue
+            upsert_kbars(conn, snap.code, pd.DataFrame([{
+                "ts":     pd.Timestamp(today),
+                "Open":   snap.open,
+                "High":   snap.high,
+                "Low":    snap.low,
+                "Close":  snap.close,
+                "Volume": snap.total_volume,
+            }]))
+            written += 1
+        time.sleep(0.2)  # 避免觸發 rate limit（最後一批也要等，保護後續 kbars 呼叫）
+    return written
 
-    # 其他情況（首次、資料不足、差超過一天）→ 重抓 30 日
+
+def fetch_full(api: sj.Shioaji, conn: sqlite3.Connection,
+               contract, today: date) -> str:
+    """重抓 30 日 K 棒並寫入 DB，回傳 'full' 或 'empty'"""
     start = (today - timedelta(days=KBAR_DAYS)).strftime("%Y-%m-%d")
     end   = today.strftime("%Y-%m-%d")
     df = fetch_kbars(api, contract, start, end)
     if df.empty:
         return "empty"
-    upsert_kbars(conn, stock_id, df)
+    upsert_kbars(conn, contract.code, df)
     return "full"
 
 
@@ -317,36 +348,60 @@ def run(debug: bool = False):
         contracts = contracts[:DEBUG_LIMIT]
         log.info("[DEBUG] 只跑前 %d 檔：%s", DEBUG_LIMIT, [c.code for c in contracts])
 
-    stats   = {"skip": 0, "append": 0, "full": 0, "empty": 0}
+    # ── 分類 ──────────────────────────────────────────────────────────────────
+    skip_list, append_list, full_list = classify_contracts(conn, contracts, today)
+    log.info("分類完成：skip=%d  append=%d  full=%d",
+             len(skip_list), len(append_list), len(full_list))
+
+    # ── 批次補一天（snapshots）────────────────────────────────────────────────
+    if append_list:
+        written = batch_append_by_snapshots(api, conn, append_list, today)
+        log.info("snapshots 批次補資料完成：%d / %d 檔寫入", written, len(append_list))
+
+    # ── 逐一重抓 30 日 ────────────────────────────────────────────────────────
+    stats   = {"skip": len(skip_list), "append": len(append_list), "full": 0, "empty": 0}
     results = []
-    total   = len(contracts)
+    total   = len(full_list)
 
-    for i, contract in enumerate(contracts, 1):
-        op = update_cache(api, conn, contract, today)
+    for i, contract in enumerate(full_list, 1):
+        op = fetch_full(api, conn, contract, today)
         stats[op] += 1
-
-        if op != "empty":
-            df  = load_kbars(conn, contract.code)
-            row = screen(df, contract, verbose=debug)
-            if row:
-                results.append(row)
-                log.info("✓ %s %s  漲幅%.1f%%  量比%.1fx",
-                         contract.code, contract.name,
-                         row["change_pct"],
-                         row["volume"] / (df["Volume"].rolling(5).mean().iloc[-2] or 1))
-
-        if debug and op != "skip":
-            latest = get_latest_date(conn, contract.code)
-            log.info("[DEBUG] %s  op=%-6s  DB最新=%s  筆數=%d",
-                     contract.code, op, latest,
-                     get_bar_count(conn, contract.code))
-
-        # API 速率控制
-        if op in ("append", "full"):
-            time.sleep(0.12)
         if i % 50 == 0:
-            log.info("進度 %d / %d  (skip=%d append=%d full=%d empty=%d)",
-                     i, total, stats["skip"], stats["append"], stats["full"], stats["empty"])
+            log.info("重抓進度 %d / %d  (full=%d empty=%d)",
+                     i, total, stats["full"], stats["empty"])
+        time.sleep(0.15)  # kbars 每次跨 30 日，流量較大，稍微保守
+
+    # ── snapshots 失敗的 append 股票 → fallback fetch_full ───────────────────
+    db_after_snap = get_all_latest(conn)
+    # 只檢查 append_list 裡哪些沒寫入，full_list 的 code 不在 append_list 裡不影響正確性
+    written_codes = {
+        c.code for c in append_list
+        if db_after_snap.get(c.code, (None,))[0] == today
+    }
+    for contract in append_list:
+        if contract.code not in written_codes:
+            op = fetch_full(api, conn, contract, today)
+            stats[op] += 1
+            time.sleep(0.15)
+
+    # ── 篩選（所有 latest == today 的股票）───────────────────────────────────
+    # 一次 query 取得所有最新日期，避免 N 次 DB 呼叫
+    db_info_final = get_all_latest(conn)
+    today_codes   = {code for code, (d, _) in db_info_final.items() if d == today}
+    for contract in contracts:
+        if contract.code not in today_codes:
+            continue
+        df = load_kbars(conn, contract.code)
+        if df.empty:
+            continue
+        row = screen(df, contract, verbose=debug)
+        if row:
+            results.append(row)
+            vol_ma5 = df["Volume"].rolling(5).mean().iloc[-2]
+            log.info("✓ %s %s  漲幅%.1f%%  量比%.1fx",
+                     contract.code, contract.name,
+                     row["change_pct"],
+                     row["volume"] / (vol_ma5 or 1))
 
     api.logout()
     conn.close()

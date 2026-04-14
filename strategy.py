@@ -138,8 +138,10 @@ def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
     # 停損條件快照（僅持倉時才計算，未持倉顯示 "-"）
     if state.bought:
         stop_a_threshold = state.trigger_lot * CFG.stop_a_multiplier
-        stop_a = ask_vol > stop_a_threshold if ask_vol >= 0 else False
-        stop_b = state.last_price < state.vwap if state.vwap > 0 else False
+        # ask_vol 此處是原始 state 值（非轉換後的 -1），直接用 state.ask_vol_at_limit_up
+        raw_ask = state.ask_vol_at_limit_up
+        stop_a = raw_ask != float('inf') and raw_ask > stop_a_threshold
+        stop_b = (state.last_price > 0 and state.last_price < state.vwap) if state.vwap > 0 else False
         if state.peak_bid_vol > 0:
             shrink     = state.peak_bid_vol - state.bid_vol_at_limit_up
             shrink_pct = shrink / state.peak_bid_vol
@@ -148,7 +150,7 @@ def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
             shrink_pct = 0.0
             stop_c = False
         stop_snap = {
-            "stopA": stop_a,  "stopA_v": f"ask={ask_vol} > {stop_a_threshold:.0f}",
+            "stopA": stop_a,  "stopA_v": f"ask={raw_ask} > {stop_a_threshold:.0f}",
             "stopB": stop_b,  "stopB_v": f"price={state.last_price} < vwap={round(state.vwap,2)}",
             "stopC": stop_c,  "stopC_v": f"shrink={shrink_pct:.1%} peak={state.peak_bid_vol} bid={state.bid_vol_at_limit_up}",
         }
@@ -235,8 +237,8 @@ def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) ->
 
 # ── 停損邏輯 ──────────────────────────────────────────────────────────────────
 
-def _reset_after_exit(state: StrategyState) -> None:
-    """出場後重置持倉狀態，累計次數 +1"""
+def _reset_after_exit(state: StrategyState, count_trade: bool = True) -> None:
+    """出場後重置持倉狀態，撤單不計入次數"""
     state.bought                     = False
     state.order_filled               = False
     state.entry_trade                = None
@@ -244,10 +246,11 @@ def _reset_after_exit(state: StrategyState) -> None:
     state.peak_bid_vol               = 0
     state.cumulative_trade_after_buy = 0
     state.recent_large_window        = []
-    state.trade_count               += 1
+    if count_trade:
+        state.trade_count += 1
 
 
-def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: str) -> None:
+def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: str, event_dt: Optional[datetime] = None) -> None:
     """送市價賣單並重置狀態"""
     print(f"[Exit] {stock_id} | {reason} | last_price={state.last_price} | vwap={state.vwap:.2f}")
 
@@ -270,9 +273,8 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
         order_status = f"Error: {e}"
 
     # 記錄出場（在 reset 之前，才能取到持倉期間的數據）
-    from datetime import datetime as _dt
     log_trade({
-        "timestamp":      _dt.now().isoformat(),
+        "timestamp":      (event_dt or datetime.now()).isoformat(),
         "stock_id":       stock_id,
         "action":         "Exit",
         "reason":         reason,
@@ -290,7 +292,7 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
     _reset_after_exit(state)
 
 
-def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> None:
+def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str, event_dt: Optional[datetime] = None) -> None:
     """三條件任一成立即市價出場"""
     if not state.bought:
         return
@@ -298,8 +300,9 @@ def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> No
     # 狀況1：有委託但未成交 → 停損條件成立時撤買單
     if not state.order_filled:
         if (
-            state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier
-            or (state.last_price < state.vwap and state.vwap > 0)
+            (state.ask_vol_at_limit_up != float('inf') and
+             state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier)
+            or (state.last_price > 0 and state.last_price < state.vwap and state.vwap > 0)
             or (
                 state.peak_bid_vol > 0
                 and (state.peak_bid_vol - state.bid_vol_at_limit_up) / state.peak_bid_vol > CFG.stop_c_shrink_ratio
@@ -308,21 +311,27 @@ def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> No
         ):
             print(f"[Cancel] {stock_id} 停損條件成立但未成交，撤銷買單")
             try:
-                api.cancel_order(state.entry_trade)
-                api.update_status(api.stock_account)
+                # double-check：避免 order_callback 在此間設了 order_filled=True
+                if not state.order_filled:
+                    api.cancel_order(state.entry_trade)
+                    api.update_status(api.stock_account)
+                    _reset_after_exit(state, count_trade=False)  # 撤單不消耗次數
+                else:
+                    # 已成交，改走停損出場流程
+                    _execute_exit(state, api, stock_id, reason="停損（撤單時已成交）", event_dt=event_dt)
             except Exception as e:
                 print(f"[Cancel] 撤單失敗: {e}")
-            _reset_after_exit(state)
         return
 
     # 狀況2：已成交 → 停損條件成立時送賣單
-    if state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier:
-        _execute_exit(state, api, stock_id, reason="停損A：委賣壓頂")
+    # 停損 A：委賣壓頂（ask_vol=0 是鎖漲停，不觸發）
+    if state.ask_vol_at_limit_up != float('inf') and state.ask_vol_at_limit_up > state.trigger_lot * CFG.stop_a_multiplier:
+        _execute_exit(state, api, stock_id, reason="停損A：委賣壓頂", event_dt=event_dt)
         return
 
-    # 停損 B：跌破 VWAP
-    if state.last_price < state.vwap:
-        _execute_exit(state, api, stock_id, reason="停損B：跌破VWAP")
+    # 停損 B：跌破 VWAP（last_price=0 代表尚未收到 tick，不觸發）
+    if state.vwap > 0 and state.last_price > 0 and state.last_price < state.vwap:
+        _execute_exit(state, api, stock_id, reason="停損B：跌破VWAP", event_dt=event_dt)
         return
 
     # 停損 C：委買撤退
@@ -330,7 +339,7 @@ def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str) -> No
         shrink     = state.peak_bid_vol - state.bid_vol_at_limit_up
         shrink_pct = shrink / state.peak_bid_vol
         if shrink_pct > CFG.stop_c_shrink_ratio and shrink > state.cumulative_trade_after_buy:
-            _execute_exit(state, api, stock_id, reason="停損C：委買撤退")
+            _execute_exit(state, api, stock_id, reason="停損C：委買撤退", event_dt=event_dt)
 
 
 # ── 每檔獨立執行緒 ────────────────────────────────────────────────────────────
@@ -375,18 +384,21 @@ def _worker(stock_id: str, state: StrategyState, q: queue.Queue, api: sj.Shioaji
                 # 股價未到漲停時五檔內不會有漲停價，回傳 0
                 lup = state.limit_up_price
                 ask_vol = 0
+                ask_found = False
                 for p, v in zip(bidask.ask_price, bidask.ask_volume):
-                    if abs(float(p) - lup) < 0.001:  # 浮點數比較用容差
+                    if abs(float(p) - lup) < 0.001:
                         ask_vol = v
+                        ask_found = True
                         break
                 bid_vol = 0
                 for p, v in zip(bidask.bid_price, bidask.bid_volume):
                     if abs(float(p) - lup) < 0.001:
                         bid_vol = v
                         break
-
-                # 只有真的在五檔裡找到漲停價才更新，否則維持 inf
-                state.ask_vol_at_limit_up = ask_vol if ask_vol > 0 else float('inf')
+                if ask_found:
+                    state.ask_vol_at_limit_up = ask_vol  # 可能是 0（鎖死）或正整數
+                else:
+                    state.ask_vol_at_limit_up = float('inf')  # 股價未到漲停
                 state.bid_vol_at_limit_up = bid_vol
 
                 # 儲存最新五檔供 monitor 顯示
@@ -399,7 +411,7 @@ def _worker(stock_id: str, state: StrategyState, q: queue.Queue, api: sj.Shioaji
 
                 if state.bought and state.bid_vol_at_limit_up > state.peak_bid_vol:
                     state.peak_bid_vol = state.bid_vol_at_limit_up
-                _check_stop_loss(state, api, stock_id)
+                _check_stop_loss(state, api, stock_id, event_dt=bidask.datetime)
 
         except Exception as e:
             print(f"[Worker:{stock_id}] 錯誤: {e}")
