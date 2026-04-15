@@ -76,21 +76,36 @@ def main() -> None:
     def order_callback(stat, msg):
         from config import CFG
         stat_str = str(stat)
-        # 正式環境：等 StockDeal（真實成交）
-        # 模擬環境：StockDeal 不會來，改用 StockOrder op_code=00 當成交確認
         if CFG.simulation:
             if "StockOrder" not in stat_str:
                 return
             if msg.get("operation", {}).get("op_code") != "00":
                 return
+            action = msg.get("order", {}).get("action", "")
+            code   = msg.get("contract", {}).get("code", "")
+            if code not in states:
+                return
+            if action == "Buy":
+                states[code].order_filled = True
+                print(f"[OrderCB] {code} 買進委託確認（模擬），允許停損出場")
+            elif action == "Sell" and states[code].exit_pending:
+                from strategy import _reset_after_exit
+                _reset_after_exit(states[code])
+                print(f"[OrderCB] {code} 賣出委託確認（模擬），狀態已重置")
         else:
             if "StockDeal" not in stat_str:
                 return
-        action = msg.get("order", {}).get("action", "") or msg.get("action", "")
-        code   = msg.get("contract", {}).get("code", "") or msg.get("code", "")
-        if action == "Buy" and code in states:
-            states[code].order_filled = True
-            print(f"[OrderCB] {code} 買進成交，允許停損出場")
+            action = msg.get("action", "")
+            code   = msg.get("code", "")
+            if code not in states:
+                return
+            if action == "Buy":
+                states[code].order_filled = True
+                print(f"[OrderCB] {code} 買進成交，允許停損出場")
+            elif action == "Sell" and states[code].exit_pending:
+                from strategy import _reset_after_exit
+                _reset_after_exit(states[code])
+                print(f"[OrderCB] {code} 賣出成交，狀態已重置")
 
     api.set_order_callback(order_callback)
 

@@ -60,6 +60,7 @@ class StrategyState:
     # 持倉狀態
     bought:        bool               = False
     order_filled:  bool               = False  # 買單已實際成交
+    exit_pending:  bool               = False  # 賣單已送出，等待成交回報
     entry_trade:   object             = None   # 買單 trade 物件，用於撤單
     bought_time:   Optional[datetime] = None
     trade_count:   int                = 0   # 當日進出場次數（上限 2）
@@ -135,6 +136,9 @@ def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
     ask_vol = state.ask_vol_at_limit_up if state.ask_vol_at_limit_up != float('inf') else -1
     cond_d = ask_vol < state.trigger_lot and ask_vol >= 0
 
+    # 條件 E：進場價不得低於 VWAP（避免進場後立刻觸發停損 B）
+    cond_e = state.vwap <= 0 or close >= state.vwap
+
     # 停損條件快照（僅持倉時才計算，未持倉顯示 "-"）
     if state.bought:
         stop_a_threshold = state.trigger_lot * CFG.stop_a_multiplier
@@ -175,6 +179,8 @@ def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
         "C_val":   f"{window_amount/1e6:.1f}M / {state.large_order_amount/1e6:.1f}M",
         "D":       cond_d,
         "D_val":   f"ask={ask_vol} < trig={state.trigger_lot}",
+        "E":       cond_e,
+        "E_val":   f"{close} >= vwap={round(state.vwap,2)}",
         "bought":  state.bought,
         **stop_snap,
     }
@@ -186,7 +192,7 @@ def _check_entry(state: StrategyState, tick: sj.TickSTKv1) -> bool:
     if state.trade_count >= MAX_TRADES_PER_DAY:
         return False
 
-    return cond_a and cond_b and cond_c and cond_d
+    return cond_a and cond_b and cond_c and cond_d and cond_e
 
 
 def _execute_entry(state: StrategyState, api: sj.Shioaji, tick: sj.TickSTKv1) -> None:
@@ -241,17 +247,21 @@ def _reset_after_exit(state: StrategyState, count_trade: bool = True) -> None:
     """出場後重置持倉狀態，撤單不計入次數"""
     state.bought                     = False
     state.order_filled               = False
+    state.exit_pending               = False
     state.entry_trade                = None
     state.bought_time                = None
     state.peak_bid_vol               = 0
     state.cumulative_trade_after_buy = 0
-    state.recent_large_window        = []
     if count_trade:
+        state.recent_large_window = []  # 真實出場才清窗口，撤單保留條件 C 累積
         state.trade_count += 1
 
 
 def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: str, event_dt: Optional[datetime] = None) -> None:
-    """送市價賣單並重置狀態"""
+    """送市價賣單，等待成交回報再 reset"""
+    if state.exit_pending:
+        return  # 賣單已送出，不重複下單
+
     print(f"[Exit] {stock_id} | {reason} | last_price={state.last_price} | vwap={state.vwap:.2f}")
 
     contract = api.Contracts.Stocks[stock_id]
@@ -272,6 +282,8 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
         print(f"[Exit] place_order 失敗: {e}")
         order_status = f"Error: {e}"
 
+    state.exit_pending = True  # 賣單已送出，等待 order_callback 確認再 reset
+
     # 記錄出場（在 reset 之前，才能取到持倉期間的數據）
     log_trade({
         "timestamp":      (event_dt or datetime.now()).isoformat(),
@@ -289,13 +301,16 @@ def _execute_exit(state: StrategyState, api: sj.Shioaji, stock_id: str, reason: 
         "cum_trade_vol":  state.cumulative_trade_after_buy,
         "order_status":   order_status,
     })
-    _reset_after_exit(state)
+    # 不在這裡 reset，由 order_callback 收到賣出成交回報後再 reset
 
 
 def _check_stop_loss(state: StrategyState, api: sj.Shioaji, stock_id: str, event_dt: Optional[datetime] = None) -> None:
     """三條件任一成立即市價出場"""
     if not state.bought:
         return
+
+    if state.exit_pending:
+        return  # 賣單已送出，等待成交回報
 
     # 狀況1：有委託但未成交 → 停損條件成立時撤買單
     if not state.order_filled:
@@ -374,6 +389,8 @@ def _worker(stock_id: str, state: StrategyState, q: queue.Queue, api: sj.Shioaji
                     state.cumulative_trade_after_buy += tick.volume
                 if not state.bought and _check_entry(state, tick):
                     _execute_entry(state, api, tick)
+                elif state.bought:
+                    _check_stop_loss(state, api, stock_id, event_dt=tick.datetime)
 
             elif kind == 'bidask':
                 bidask: sj.BidAskSTKv1 = data

@@ -1,0 +1,26 @@
+2026-04-15 10:51:31.008 | WARNING  | importlib._bootstrap:_call_with_frames_removed:241 - Optional: pip install shioaji[speed] or uv add shioaji --extra speed for better performance.
+2026-04-15 10:51:31,094 INFO 掃描日期：2026-04-15
+2026-04-15 10:51:39,998 INFO 四位數股票總數：1963
+2026-04-15 10:51:40,184 INFO 分類完成：skip=0  append=1930  full=33
+2026-04-15 10:51:50,720 INFO snapshots 批次補資料完成：1930 / 1930 檔寫入
+2026-04-15 10:51:56,881 INFO ✓ 6706 惠特  漲幅8.6%  量比1.7x
+2026-04-15 10:51:57,364 INFO ✓ 6753 龍德造船  漲幅7.0%  量比4.0x
+2026-04-15 10:51:57,408 INFO ✓ 2376 技嘉  漲幅6.6%  量比1.5x
+2026-04-15 10:51:57,568 INFO ✓ 3016 嘉晶  漲幅4.3%  量比1.5x
+2026-04-15 10:51:57,570 INFO ✓ 6533 晶心科  漲幅5.7%  量比2.0x
+2026-04-15 10:51:58,073 INFO ✓ 2637 慧洋-KY  漲幅4.0%  量比1.7x
+2026-04-15 10:51:58,547 INFO ✓ 3217 優群  漲幅4.8%  量比2.7x
+2026-04-15 10:51:59,346 INFO ✓ 3444 利機  漲幅7.7%  量比1.9x
+2026-04-15 10:51:59,562 INFO 快取更新完成：skip=0 append=1930 full=33 empty=0
+2026-04-15 10:51:59,568 INFO 完成！共 8 檔，已存至 /home/ec2-user/Scalp/watchlist.csv
+Response Code: 0 | Event Code: 0 | Info: host '210.59.255.161:80', hostname '210.59.255.161:80' IP 210.59.255.161:80 (host 1 of 1) (host connection attempt 1 of 1) (total connection attempt 1 of 1) | Event: Session up
+Response Code: 200 | Event Code: 16 | Info: APISUB/V1/SYS/CONTRACT | Event: Subscribe or Unsubscribe ok
+stock_id  name  close  change_pct  volume  amount_m    ma5   ma20  strength  large_order_amount
+    6706    惠特  151.5        8.60   16046    2431.0 140.00 126.30     0.857          19434982.0
+    3444    利機   78.2        7.71    1327     103.8  72.78  65.28     0.754           5000000.0
+    6753  龍德造船  138.5        6.95    2598     359.8 129.50 129.57     0.720           5000000.0
+    2376    技嘉  281.0        6.64   16765    4711.0 264.40 243.15     0.812          44056030.0
+    6533   晶心科  202.5        5.74     975     197.4 186.00 183.48     0.913           5000000.0
+    3217    優群  164.0        4.79    1339     219.6 157.30 155.65     0.867           5000000.0
+    3016    嘉晶   63.4        4.28    3264     206.9  58.14  58.09     0.825           5000000.0
+    2637 慧洋-KY   73.0        3.99    3299     240.8  70.88  69.76     0.864           5000000.0

@@ -25,8 +25,9 @@ class Config:
     large_window_seconds: int = 10            # 滑動窗口秒數
 
     # ── 停損參數 ──────────────────────────────────────
-    stop_a_multiplier:   float = 3.0          # 停損 A：trigger_lot × 3
-    stop_c_shrink_ratio: float = 0.30         # 停損 C：委買縮減比例門檻
+    stop_a_multiplier:    float = 3.0         # 停損 A：trigger_lot × 3
+    stop_c_shrink_ratio:  float = 0.30        # 停損 C：委買縮減比例門檻
+    entry_cooldown_seconds: float = 3.0       # 進場後停損冷卻秒數（避免立刻停損）
 
 
 CFG = Config()

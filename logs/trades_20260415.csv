@@ -1,0 +1,5 @@
+timestamp,stock_id,action,reason,price,limit_up_price,vwap,ask_vol,bid_vol,trigger_lot,trade_count,peak_bid_vol,cum_trade_vol,order_status
+2026-04-15T11:04:13.122195,6706,Entry,四條件成立,153.0,153.0,152.77,168,0,197,1,0,0,Status.PendingSubmit
+2026-04-15T11:04:20.732395,6706,Exit,停損B：跌破VWAP,152.5,153.0,152.79,6,0,197,1,0,176,Status.PendingSubmit
+2026-04-15T11:05:05.308788,6706,Entry,四條件成立,152.5,153.0,152.82,183,0,197,2,0,0,Status.PendingSubmit
+2026-04-15T11:05:05.308788,6706,Exit,停損B：跌破VWAP,152.5,153.0,152.82,184,0,197,2,0,0,Status.PendingSubmit
